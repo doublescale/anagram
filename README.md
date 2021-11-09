@@ -2,6 +2,8 @@
 Find anagrams.
 Linux only.
 
+![Screencap](demo.gif)
+
 ## Build & Run
 ```bash
 ./build
