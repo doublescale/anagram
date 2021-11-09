@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+# gcc -g -O0 -pthread -o anagram src/main.c
+gcc -O3 -pthread -o anagram src/main.c
+# gcc -Wall -Wno-missing-braces -pthread -o anagram src/main.c
