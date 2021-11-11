@@ -1347,7 +1347,7 @@ internal void go_live(hashtable_t* hashtable)
           if(typed_key == KEY_SHIFT_TAB)
           {
             --state->active_ui_str_idx;
-            if(state->active_ui_str_idx < 0)
+            if((i32)state->active_ui_str_idx < 0)
             {
               state->active_ui_str_idx += UI_STR_COUNT;
             }
