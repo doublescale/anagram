@@ -347,6 +347,12 @@ internal void handle_interrupt(int c)
   global_quitting = 1;
 }
 
+static u32 global_ctrl_z_press_count = 0;
+internal void handle_ctrl_z(int c)
+{
+  ++global_ctrl_z_press_count;
+}
+
 void* input_fun(void* void_data)
 {
   input_thread_data_t* data = (input_thread_data_t*)void_data;
@@ -429,6 +435,7 @@ enum
   KEY_DELETE,
   KEY_CTRL_DELETE,
   KEY_ALT_D,
+  KEY_F1,
   KEY_F12,
 };
 
@@ -440,12 +447,12 @@ internal void begin_terminal_io(terminal_context_t* ctx)
     struct sigaction handle_int = {
       .sa_handler = handle_interrupt,
     };
-    struct sigaction ignore = {
-      .sa_handler = SIG_IGN,
+    struct sigaction handle_sigtstp = {
+      .sa_handler = handle_ctrl_z,
     };
     sigaction(SIGINT, &handle_int, 0);  // Ctrl+C
     sigaction(SIGTERM, &handle_int, 0);  // kill
-    sigaction(SIGTSTP, &ignore, 0);  // Ctrl+Z
+    sigaction(SIGTSTP, &handle_sigtstp, 0);  // Ctrl+Z
   }
 
   // Turn off stdin echoing, line buffering, Ctrl+S/Q handling.
@@ -579,142 +586,125 @@ internal void get_terminal_events(terminal_context_t* ctx, live_input_t* input, 
 
       case KEY_ESCAPE:
       {
-        b32 handled = true;
+        b32 handled = false;
         // TODO: Check key count properly in various cases.
         if(ctx->input_thread_data.key_count - input_key_idx >= 2)
         {
-          u8 next_key = ctx->input_thread_data.key_buf[input_key_idx + 1];
-          char* in = (char*)ctx->input_thread_data.key_buf + input_key_idx + 2;
-          input_key_idx += 1;
-          if(next_key == '[')
+          u8* escape_code = ctx->input_thread_data.key_buf + input_key_idx + 1;
+          if(escape_code[0] == '[' && escape_code[1] == '<')
           {
-            // Some terminal code, followed by more bytes.
-            if(in[0] == '<')
+            // Mouse input.
+            u32 mouse_state;
+            i32 mouse_col, mouse_row;
+            char mm;
+            i32 consumed_count;
+            sscanf(escape_code, "[<%d;%d;%d%c%n",
+                &mouse_state, &mouse_col, &mouse_row, &mm, &consumed_count);
+            u32 mouse_buttons = mouse_state & 67;
+            input_key_idx += consumed_count;
+
+            input->mouse_pos.x = mouse_col - 1;
+            input->mouse_pos.y = frame->height - mouse_row;
+
+            b32 ended_down = (mm == 'M');
+            i32 transitions = !ended_down || !(mouse_state & 32) ? 1 : 0;
+            if(mouse_buttons == 0)
             {
-              // Mouse input.
-              u32 mouse_state;
-              i32 mouse_col, mouse_row;
-              char mm;
-              i32 consumed_count;
-              sscanf(in, "<%d;%d;%d%c%n",
-                  &mouse_state, &mouse_col, &mouse_row, &mm, &consumed_count);
-              u32 mouse_buttons = mouse_state & 67;
-              input_key_idx += consumed_count;
-
-              input->mouse_pos.x = mouse_col - 1;
-              input->mouse_pos.y = frame->height - mouse_row;
-
-              b32 ended_down = (mm == 'M');
-              i32 transitions = !ended_down || !(mouse_state & 32) ? 1 : 0;
-              if(mouse_buttons == 0)
-              {
-                input->btn_mouse_left.half_transitions += transitions;
-                input->btn_mouse_left.ended_down = ended_down;
-                ctx->input_persist.btn_mouse_left.ended_down = ended_down;
-              }
-              else if(mouse_buttons == 1)
-              {
-                input->btn_mouse_middle.half_transitions += transitions;
-                input->btn_mouse_middle.ended_down = ended_down;
-                ctx->input_persist.btn_mouse_middle.ended_down = ended_down;
-              }
-              else if(mouse_buttons == 2)
-              {
-                input->btn_mouse_right.half_transitions += transitions;
-                input->btn_mouse_right.ended_down = ended_down;
-                ctx->input_persist.btn_mouse_right.ended_down = ended_down;
-              }
-
-              if(mouse_buttons == 64)
-              {
-                input->mouse_scroll_y += 1;
-              }
-              else if(mouse_buttons == 65)
-              {
-                input->mouse_scroll_y -= 1;
-              }
-
-              u32 mouse_modifiers = mouse_state & 0x1c;
-              input->modifiers_held =
-                ((mouse_modifiers & 0x04) ? MODIFIER_SHIFT : 0) |
-                ((mouse_modifiers & 0x08) ? MODIFIER_ALT   : 0) |
-                ((mouse_modifiers & 0x10) ? MODIFIER_CTRL  : 0);
-              ctx->input_persist.modifiers_held = input->modifiers_held;
-
-              handled = true;
+              input->btn_mouse_left.half_transitions += transitions;
+              input->btn_mouse_left.ended_down = ended_down;
+              ctx->input_persist.btn_mouse_left.ended_down = ended_down;
             }
-            else
+            else if(mouse_buttons == 1)
             {
-              // TODO: Unify this with the non-"next_key == '['" case.
-              struct
-              {
-                char* code;
-                u8 key;
-              } escape_code_mappings[] = {
-                { "A",    KEY_ARROW_UP },
-                { "B",    KEY_ARROW_DOWN },
-                { "C",    KEY_ARROW_RIGHT },
-                { "D",    KEY_ARROW_LEFT },
-                { "F",    KEY_END },
-                { "H",    KEY_HOME },
-                { "Z",    KEY_SHIFT_TAB },
-                { "1;5A", KEY_CTRL_ARROW_UP },
-                { "1;5B", KEY_CTRL_ARROW_DOWN },
-                { "1;5C", KEY_CTRL_ARROW_RIGHT },
-                { "1;5D", KEY_CTRL_ARROW_LEFT },
-                { "1;5F", KEY_CTRL_END },
-                { "1;5H", KEY_CTRL_HOME },
-                { "24~",  KEY_F12 },
-                { "3~",   KEY_DELETE },
-                { "3;5~", KEY_CTRL_DELETE },
-                { "5~",   KEY_PAGE_UP },
-                { "6~",   KEY_PAGE_DOWN },
-              };
-
-              handled = false;
-              u32 code_length = 0;
-              int match_key = 0;
-              for(u32 mapping_idx = 0;
-                  mapping_idx < array_count(escape_code_mappings) && !handled;
-                  ++mapping_idx)
-              {
-                // TODO: Limit by input length.
-                char* inc = in;
-                char* c = escape_code_mappings[mapping_idx].code;
-                b32 matches = true;
-                while(*c && matches)
-                {
-                  matches = (*c == *inc);
-                  ++inc;
-                  ++c;
-                }
-                if(matches)
-                {
-                  handled = true;
-                  code_length = (inc - in);
-                  match_key = escape_code_mappings[mapping_idx].key;
-                }
-              }
-              if(handled)
-              {
-                input_key_idx += code_length;
-                if(input->typed_key_count < array_count(ctx->typed_key_buffer))
-                {
-                  ctx->typed_key_buffer[input->typed_key_count++] = match_key;
-                }
-              }
+              input->btn_mouse_middle.half_transitions += transitions;
+              input->btn_mouse_middle.ended_down = ended_down;
+              ctx->input_persist.btn_mouse_middle.ended_down = ended_down;
             }
-          }
-          else if(next_key == 'd')
-          {
-            if(input->typed_key_count < array_count(ctx->typed_key_buffer))
+            else if(mouse_buttons == 2)
             {
-              ctx->typed_key_buffer[input->typed_key_count++] = KEY_ALT_D;
+              input->btn_mouse_right.half_transitions += transitions;
+              input->btn_mouse_right.ended_down = ended_down;
+              ctx->input_persist.btn_mouse_right.ended_down = ended_down;
             }
+
+            if(mouse_buttons == 64)
+            {
+              input->mouse_scroll_y += 1;
+            }
+            else if(mouse_buttons == 65)
+            {
+              input->mouse_scroll_y -= 1;
+            }
+
+            u32 mouse_modifiers = mouse_state & 0x1c;
+            input->modifiers_held =
+              ((mouse_modifiers & 0x04) ? MODIFIER_SHIFT : 0) |
+              ((mouse_modifiers & 0x08) ? MODIFIER_ALT   : 0) |
+              ((mouse_modifiers & 0x10) ? MODIFIER_CTRL  : 0);
+            ctx->input_persist.modifiers_held = input->modifiers_held;
+
+            handled = true;
           }
           else
           {
-            handled = false;
+            struct
+            {
+              u8* code;
+              u8 key;
+            } escape_code_mappings[] = {
+              { "d",     KEY_ALT_D },
+              { "OP",    KEY_F1 },
+              { "[A",    KEY_ARROW_UP },
+              { "[B",    KEY_ARROW_DOWN },
+              { "[C",    KEY_ARROW_RIGHT },
+              { "[D",    KEY_ARROW_LEFT },
+              { "[F",    KEY_END },
+              { "[H",    KEY_HOME },
+              { "[Z",    KEY_SHIFT_TAB },
+              { "[1;5A", KEY_CTRL_ARROW_UP },
+              { "[1;5B", KEY_CTRL_ARROW_DOWN },
+              { "[1;5C", KEY_CTRL_ARROW_RIGHT },
+              { "[1;5D", KEY_CTRL_ARROW_LEFT },
+              { "[1;5F", KEY_CTRL_END },
+              { "[1;5H", KEY_CTRL_HOME },
+              { "[24~",  KEY_F12 },
+              { "[3~",   KEY_DELETE },
+              { "[3;5~", KEY_CTRL_DELETE },
+              { "[5~",   KEY_PAGE_UP },
+              { "[6~",   KEY_PAGE_DOWN },
+            };
+
+            u32 code_length = 0;
+            int match_key = 0;
+            for(u32 mapping_idx = 0;
+                mapping_idx < array_count(escape_code_mappings) && !handled;
+                ++mapping_idx)
+            {
+              // TODO: Limit by input length.
+              u8* inc = escape_code;
+              u8* c = escape_code_mappings[mapping_idx].code;
+              b32 matches = true;
+              while(*c && matches)
+              {
+                matches = (*c == *inc);
+                ++inc;
+                ++c;
+              }
+              if(matches)
+              {
+                handled = true;
+                code_length = (inc - escape_code);
+                match_key = escape_code_mappings[mapping_idx].key;
+              }
+            }
+            if(handled)
+            {
+              input_key_idx += code_length;
+              if(input->typed_key_count < array_count(ctx->typed_key_buffer))
+              {
+                ctx->typed_key_buffer[input->typed_key_count++] = match_key;
+              }
+            }
           }
         }
         else
@@ -734,6 +724,14 @@ internal void get_terminal_events(terminal_context_t* ctx, live_input_t* input, 
       } break;
     }
   }
+
+  while(global_ctrl_z_press_count > 0 &&
+      input->typed_key_count < array_count(ctx->typed_key_buffer))
+  {
+    ctx->typed_key_buffer[input->typed_key_count++] = KEY_CTRL_Z;
+    --global_ctrl_z_press_count;
+  }
+
   ctx->input_thread_data.key_count = 0;
   pthread_mutex_unlock(&ctx->input_thread_data.mutex);
 

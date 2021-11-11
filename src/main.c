@@ -688,7 +688,7 @@ internal anagram_context_t begin_anagram_context(hashtable_t* hashtable, arena_t
   ctx.initialized = true;
   ctx.tmp_arena = arena;
   ctx.tmp_arena_snap = arena_snap(arena);
-  ctx.results.arena = new_arena();
+  ctx.results.arena = new_custom_arena(1024 * 1024);
   ctx.results.not_done = true;
 
   breakdown_t must_include_breakdown = {0};
@@ -698,9 +698,9 @@ internal anagram_context_t begin_anagram_context(hashtable_t* hashtable, arena_t
 
   if(!must_include_is_valid)
   {
-    // TODO: List possible words to add, like in list_anagrams_for.
+    // TODO: Suggest possible words to add, like in list_anagrams_for.
   }
-  else if(breakdown_is_empty(&reduced_input_breakdown))
+  else if(must_include.size > 0 && breakdown_is_empty(&reduced_input_breakdown))
   {
     begin_anagram_result(&ctx.results, 0);
   }
@@ -1033,21 +1033,23 @@ typedef struct
 
 #define MAX_USER_INPUT_SIZE 1024
 
-// TODO: Compress this more
-typedef struct
+typedef struct undo_entry_t
 {
-  u8 ui_str_bufs[UI_STR_COUNT][MAX_USER_INPUT_SIZE];
+  ui_state_t ui_state;  // TODO: Leave out unrecorded fields.
 
-  ui_state_t ui_state;
+  arena_snap_t arena_after_this;
+  
+  struct undo_entry_t* previous;
+  struct undo_entry_t* next;
 } undo_entry_t;
 
 typedef struct
 {
   arena_t* arena;
 
-  u32 entry_count;
-  u32 next_entry_idx;
-  undo_entry_t entries[256];
+  undo_entry_t* first_entry;
+  undo_entry_t* current_entry;
+  undo_entry_t* last_entry;
 } undo_history_t;
 
 internal void scroll_results(ui_state_t* state, i32 scroll_amount)
@@ -1080,7 +1082,7 @@ internal void handle_ui_str_deletion(ui_state_t* state,
   }
 }
 
-internal void copy_str_unsafe(str_t src, str_t *dst)
+internal void copy_str_unsafe(str_t src, str_t* dst)
 {
   dst->size = src.size;
   for(size_t char_idx = 0;
@@ -1095,42 +1097,64 @@ internal b32 record_for_undo(ui_state_t* state, undo_history_t* history)
 {
   b32 do_record = false;
 
-  if(history->next_entry_idx < array_count(history->entries))
+  // TODO: Clear old undo entries if history uses too much memory.
+
+  if(!history->current_entry)
   {
-    if(history->entry_count == 0)
+    do_record = true;
+  }
+  else
+  {
+    undo_entry_t* previous_entry = history->current_entry;
+    ui_state_t* previous_state = &previous_entry->ui_state;
+
+    for(ui_str_idx_t str_idx = 0;
+        str_idx < UI_STR_COUNT;
+        ++str_idx)
     {
-      do_record = true;
+      do_record |= !str_eq(state->ui_strs[str_idx], previous_state->ui_strs[str_idx]);
+    }
+  }
+
+  if(do_record)
+  {
+    if(history->current_entry)
+    {
+      arena_restore(history->current_entry->arena_after_this);
+
+      // Not strictly necessary, but avoid pointing into freed memory.
+      history->current_entry->next = 0;
+      history->last_entry = history->current_entry;
+    }
+
+    undo_entry_t* new_entry = alloc_struct_clear(history->arena, undo_entry_t);
+    new_entry->previous = history->current_entry;
+    if(!history->current_entry)
+    {
+      history->first_entry = new_entry;
+      new_entry->previous = 0;
     }
     else
     {
-      undo_entry_t* previous_entry = history->entries + history->next_entry_idx - 1;
-      ui_state_t* previous_state = &previous_entry->ui_state;
-
-      // TODO: Be more precise.
-      for(ui_str_idx_t str_idx = 0;
-          str_idx < UI_STR_COUNT;
-          ++str_idx)
-      {
-        do_record |= !str_eq(state->ui_strs[str_idx], previous_state->ui_strs[str_idx]);
-      }
+      history->current_entry->next = new_entry;
     }
+    history->last_entry = new_entry;
+    history->current_entry = new_entry;
 
-    if(do_record)
+    new_entry->ui_state = *state;
+
+    for(ui_str_idx_t str_idx = 0;
+        str_idx < UI_STR_COUNT;
+        ++str_idx)
     {
-      undo_entry_t* new_entry = history->entries + history->next_entry_idx;
-      ++history->next_entry_idx;
-      history->entry_count = history->next_entry_idx;
+      str_t src_str = state->ui_strs[str_idx];
+      str_t* dst_str = &new_entry->ui_state.ui_strs[str_idx];
 
-      new_entry->ui_state = *state;
-
-      for(ui_str_idx_t str_idx = 0;
-          str_idx < UI_STR_COUNT;
-          ++str_idx)
-      {
-        new_entry->ui_state.ui_strs[str_idx].data = new_entry->ui_str_bufs[str_idx];
-        copy_str_unsafe(state->ui_strs[str_idx], &new_entry->ui_state.ui_strs[str_idx]);
-      }
+      dst_str->data = alloc_array(history->arena, src_str.size, u8);
+      copy_str_unsafe(src_str, dst_str);
     }
+
+    new_entry->arena_after_this = arena_snap(history->arena);
   }
 
   return do_record;
@@ -1155,10 +1179,10 @@ internal b32 undo(ui_state_t* state, undo_history_t* history)
   b32 result = false;
 
   record_for_undo(state, history);
-  if(history->next_entry_idx > 1)
+  if(history->current_entry && history->current_entry->previous)
   {
-    apply_undo_entry_to_state(state, &history->entries[history->next_entry_idx - 2]);
-    history->next_entry_idx -= 1;
+    apply_undo_entry_to_state(state, history->current_entry->previous);
+    history->current_entry = history->current_entry->previous;
     result = true;
   }
 
@@ -1169,10 +1193,10 @@ internal b32 redo(ui_state_t* state, undo_history_t* history)
 {
   b32 result = false;
 
-  if(history->next_entry_idx < history->entry_count)
+  if(history->current_entry->next)
   {
-    apply_undo_entry_to_state(state, &history->entries[history->next_entry_idx]);
-    ++history->next_entry_idx;
+    history->current_entry = history->current_entry->next;
+    apply_undo_entry_to_state(state, history->current_entry);
     result = true;
   }
 
@@ -1186,7 +1210,7 @@ internal void go_live(hashtable_t* hashtable)
   char_frame_t frame = {0};
   live_input_t input = {0};
 
-  arena_t tmp_arena = new_arena();
+  arena_t tmp_arena = new_custom_arena(512 * 1024);
   u8* input_buf   = alloc_array(&tmp_arena, MAX_USER_INPUT_SIZE, u8);
   u8* include_buf = alloc_array(&tmp_arena, MAX_USER_INPUT_SIZE, u8);
   u8* exclude_buf = alloc_array(&tmp_arena, MAX_USER_INPUT_SIZE, u8);
@@ -1196,7 +1220,7 @@ internal void go_live(hashtable_t* hashtable)
   state->ui_strs[UI_STR_INCLUDE].data = include_buf;
   state->ui_strs[UI_STR_EXCLUDE].data = exclude_buf;
 
-  arena_t undo_arena = new_arena();
+  arena_t undo_arena = new_custom_arena(256 * 1024);
   undo_history_t* history = alloc_struct_clear(&undo_arena, undo_history_t);
   history->arena = &undo_arena;
 
@@ -1222,7 +1246,7 @@ internal void go_live(hashtable_t* hashtable)
 
     i32 previous_cursor_pos = state->cursor_pos;
     i32 previous_skip_results = state->skip_results;
-    u32 previous_undo_idx = history->next_entry_idx;
+    undo_entry_t* previous_current_undo_entry = history->current_entry;
     for(u32 typed_key_idx = 0;
         typed_key_idx < input.typed_key_count;
         ++typed_key_idx)
@@ -1394,7 +1418,7 @@ internal void go_live(hashtable_t* hashtable)
 #endif
 
         case KEY_CTRL_O:
-        case KEY_CTRL_Z: // TODO: Get KEY_CTRL_Z working
+        case KEY_CTRL_Z:
         {
           inputs_changed |= undo(state, history);
         } break;
@@ -1404,6 +1428,7 @@ internal void go_live(hashtable_t* hashtable)
           inputs_changed |= redo(state, history);
         } break;
 
+        case KEY_F1:
         case KEY_CTRL_SLASH:
         {
           state->show_help = !state->show_help;
@@ -1469,7 +1494,7 @@ internal void go_live(hashtable_t* hashtable)
     dirty |= right_clicked;
     dirty |= (state->cursor_pos != previous_cursor_pos);
     dirty |= (state->skip_results != previous_skip_results);
-    dirty |= (state->show_debug && history->next_entry_idx != previous_undo_idx);
+    dirty |= (state->show_debug && history->current_entry != previous_current_undo_entry);
     dirty |= inputs_changed;
     dirty |= anagram_context.results.not_done;
     if(dirty)
@@ -1488,14 +1513,31 @@ internal void go_live(hashtable_t* hashtable)
         }
       }
 
-      // DEBUG
       if(state->show_debug)
       {
+        b32 current_entry_found = false;
+        u32 current_undo_idx = 0;
+        u32 undo_count = 0;
+        for(undo_entry_t* entry = history->first_entry;
+            entry;
+            entry = entry->next)
+        {
+          if(!current_entry_found && entry == history->current_entry)
+          {
+            current_undo_idx = undo_count;
+            current_entry_found = true;
+          }
+          ++undo_count;
+        }
+
         u8 txt[256];
-        size_t len = snprintf(txt, 256, "Undo history: next %u, count %u",
-            history->next_entry_idx, history->entry_count);
+        size_t len = snprintf(txt, 256,
+            "Tmp arena: %uK; Results arena: %uM; Undo history: %u/%u, %uK",
+            (u32)(tmp_arena.total_capacity / 1024),
+            (u32)(anagram_context.results.arena.total_capacity / 1024 / 1024),
+            current_undo_idx + 1, undo_count, (u32)(undo_arena.total_capacity / 1024));
         str_t str = {len, txt};
-        draw_str(&frame, white, black, 50, frame.height - 1, str);
+        draw_str(&frame, (v3u8){0, 255, 0}, black, 0, frame.height - 1, str);
       }
 
       i32 start_x = 2;
@@ -1619,6 +1661,7 @@ internal void go_live(hashtable_t* hashtable)
         state->skip_results = 0;
         state->skip_results_target = 0;
         end_anagram_context(&anagram_context);
+        dirty = true;  // update arena statistics in debug view
 
         breakdown_t input_breakdown = {0};
         breakdown_word(&input_breakdown, state->ui_strs[UI_STR_INPUT]);
@@ -1767,7 +1810,7 @@ internal void go_live(hashtable_t* hashtable)
         str_t help_lines[] = {
           str("                    ---  KEYS  ---                    "),
           str(""),
-          str("Ctrl+/                      Toggle this help"),
+          str("F1, Ctrl+/                  Toggle this help"),
           str("Tab, Shift+Tab, Enter       Cycle through input fields"),
           str("Scroll, Up/Down, PgUp/PgDn  Scroll through results"),
           str("Ctrl+Home, Ctrl+End         Jump to results start, end"),
@@ -1776,7 +1819,7 @@ internal void go_live(hashtable_t* hashtable)
           str("Right click on input        Delete word"),
           str("Ctrl+U, Ctrl+K              Delete to start, end"),
           str("Ctrl+W, Alt+D               Delete word to left, right"),
-          str("Ctrl+O, Ctrl+Y              Undo, redo (WIP)"),
+          str("Ctrl+Z, Ctrl+Y              Undo, redo"),
         };
 
         i32 help_line_count = array_count(help_lines);

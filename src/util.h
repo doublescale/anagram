@@ -149,6 +149,9 @@ typedef struct arena_block_t
 
 typedef struct
 {
+  size_t block_size;
+  size_t total_capacity;
+
   arena_block_t* head;
 } arena_t;
 
@@ -159,10 +162,16 @@ typedef struct
   size_t used;
 } arena_snap_t;
 
+internal arena_t new_custom_arena(size_t block_size)
+{
+  arena_t result = {0};
+  result.block_size = block_size;
+  return result;
+}
+
 internal arena_t new_arena()
 {
-  arena_t result = {};
-  return result;
+  return new_custom_arena(8 * 1024 * 1024);
 }
 
 internal arena_snap_t arena_snap(arena_t* arena)
@@ -187,6 +196,7 @@ internal void arena_restore(arena_snap_t snap)
   {
     arena_block_t* block = arena->head;
     assert(block);
+    arena->total_capacity -= block->capacity;
     arena->head = block->previous_block;
     free(block);
   }
@@ -202,9 +212,11 @@ internal void clear_arena(arena_t* arena)
   while(arena->head)
   {
     arena_block_t* block = arena->head;
+    arena->total_capacity -= block->capacity;
     arena->head = block->previous_block;
     free(block);
   }
+  assert(arena->total_capacity == 0);
 }
 
 internal void* alloc_bytes(arena_t* arena, size_t size)
@@ -214,9 +226,8 @@ internal void* alloc_bytes(arena_t* arena, size_t size)
   b32 allocate = !arena->head || (arena->head->used + size > arena->head->capacity);
   if(allocate)
   {
-    size_t default_capacity = 8 * 1024 * 1024;
+    size_t default_capacity = arena->block_size;
     size_t capacity = (size > default_capacity) ? size : default_capacity;
-    // printf("* Allocating %lu bytes capacity\n", capacity);
     arena_block_t* block = malloc(sizeof(arena_block_t) + capacity);
     if(block)
     {
@@ -226,6 +237,7 @@ internal void* alloc_bytes(arena_t* arena, size_t size)
         .previous_block = arena->head,
       };
       arena->head = block;
+      arena->total_capacity += capacity;
     }
   }
 
