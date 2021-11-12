@@ -1241,7 +1241,7 @@ internal void go_live(hashtable_t* hashtable)
     b32 right_clicked = went_down(input.btn_mouse_right);
     dirty |= frame.full_redraw;
 
-    i32 anagram_start_y = frame.height - 11;
+    i32 anagram_start_y = frame.height - 12;
     i32 visible_anagram_count = anagram_start_y + 1;
 
     i32 previous_cursor_pos = state->cursor_pos;
@@ -1677,6 +1677,29 @@ internal void go_live(hashtable_t* hashtable)
       }
 
       anagram_results_t* results = &anagram_context.results;
+      {
+        u8 txt[256];
+        size_t len = 0;
+        if(results->result_count > 0)
+        {
+          u32 count_len = snprintf(txt, array_count(txt), "%u", (u32)results->result_count);
+          count_len = max(4, count_len);
+          len = snprintf(txt, array_count(txt), "Results %*u to %*u of %*u%s:",
+              count_len, (u32)(state->skip_results + 1),
+              count_len, (u32)(max(state->skip_results + 1,
+                                   min(results->result_count,
+                                       state->skip_results + max(1, visible_anagram_count)))),
+              count_len, (u32)results->result_count, results->not_done ? " (maybe more)" : "");
+        }
+        else
+        {
+          len = snprintf(txt, array_count(txt), "No results.");
+        }
+        str_t str = {len, txt};
+        i32 x = start_x;
+        i32 y = anagram_start_y + 1;
+        draw_str(&frame, white, black, x, y, str);
+      }
       i32 current_y = anagram_start_y + state->skip_results;
       str_t orig_include_str = state->ui_strs[UI_STR_INCLUDE];
       size_t include_deletion_start = 0;
@@ -1687,7 +1710,7 @@ internal void go_live(hashtable_t* hashtable)
       {
         if(current_y <= anagram_start_y)
         {
-          i32 current_x = start_x;
+          i32 current_x = start_x + 2;
           if(orig_include_str.size > 0)
           {
             if(left_clicked || right_clicked)
