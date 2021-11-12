@@ -1298,12 +1298,14 @@ internal void go_live(hashtable_t* hashtable)
         } break;
 
         case KEY_PAGE_DOWN:
+        case KEY_CTRL_PAGE_DOWN:
         {
           record_for_undo(state, history);
           scroll_results(state, max(1, visible_anagram_count - 2));
         } break;
 
         case KEY_PAGE_UP:
+        case KEY_CTRL_PAGE_UP:
         {
           record_for_undo(state, history);
           scroll_results(state, -max(1, visible_anagram_count - 2));
@@ -1474,6 +1476,12 @@ internal void go_live(hashtable_t* hashtable)
     }
 
     scroll_results(state, -2 * input.mouse_scroll_y);
+
+    if(!anagram_context.results.not_done)
+    {
+      state->skip_results_target =
+        min(anagram_context.results.result_count - 1, state->skip_results_target);
+    }
 
     if(state->skip_results_target < state->skip_results)
     {
@@ -1825,7 +1833,7 @@ internal void go_live(hashtable_t* hashtable)
           *c = to_upper(*c);
         }
         i32 searching_y = min(anagram_start_y, current_y);
-        draw_str(&frame, bright_gray, black, start_x, searching_y, status_str);
+        draw_str(&frame, bright_gray, black, start_x + 2, searching_y, status_str);
       }
 
       if(state->help_expansion > 0)

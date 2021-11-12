@@ -428,6 +428,8 @@ enum
   KEY_SHIFT_TAB,
   KEY_PAGE_DOWN,
   KEY_PAGE_UP,
+  KEY_CTRL_PAGE_DOWN,
+  KEY_CTRL_PAGE_UP,
   KEY_HOME,
   KEY_END,
   KEY_CTRL_HOME,
@@ -671,7 +673,9 @@ internal void get_terminal_events(terminal_context_t* ctx, live_input_t* input, 
               { "[3~",   KEY_DELETE },
               { "[3;5~", KEY_CTRL_DELETE },
               { "[5~",   KEY_PAGE_UP },
+              { "[5;5~", KEY_CTRL_PAGE_UP },
               { "[6~",   KEY_PAGE_DOWN },
+              { "[6;5~", KEY_CTRL_PAGE_DOWN },
             };
 
             u32 code_length = 0;
