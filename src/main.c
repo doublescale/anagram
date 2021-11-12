@@ -36,8 +36,10 @@ typedef struct
   keylink_t* entries[128 * 1024];
 } hashtable_t;
 
-internal void breakdown_word(breakdown_t* breakdown, str_t word)
+internal breakdown_t breakdown_word(str_t word)
 {
+  breakdown_t result = {0};
+
   for(u32 idx = 0;
       idx < word.size;
       ++idx)
@@ -46,11 +48,13 @@ internal void breakdown_word(breakdown_t* breakdown, str_t word)
     if(is_alpha(c))
     {
       u32 breakdown_idx = to_lower(c) - 'a';
-      assert(breakdown_idx < array_count(breakdown->counts));
-      assert(breakdown->counts[breakdown_idx] < I8_MAX);
-      ++breakdown->counts[breakdown_idx];
+      assert(breakdown_idx < array_count(result.counts));
+      assert(result.counts[breakdown_idx] < I8_MAX);
+      ++result.counts[breakdown_idx];
     }
   }
+
+  return result;
 }
 
 internal b32 breakdown_eq(breakdown_t* a, breakdown_t* b)
@@ -307,9 +311,8 @@ internal void list_anagrams_for(hashtable_t* hashtable, arena_t* arena,
     breakdown_t input_breakdown, str_t must_include, str_t space_separated_must_exclude,
     i32 max_results)
 {
-  breakdown_t must_include_breakdown = {0};
   breakdown_t reduced_input_breakdown = input_breakdown;
-  breakdown_word(&must_include_breakdown, must_include);
+  breakdown_t must_include_breakdown = breakdown_word(must_include);
   b32 must_include_is_valid = breakdown_subtract(&reduced_input_breakdown, &must_include_breakdown);
 
   if(!must_include_is_valid)
@@ -682,7 +685,9 @@ internal anagram_result_t* begin_anagram_result(anagram_results_t* results, u32 
 }
 
 internal anagram_context_t begin_anagram_context(hashtable_t* hashtable, arena_t* arena,
-    breakdown_t input_breakdown, str_t must_include, str_t space_separated_must_exclude)
+    breakdown_t* input_breakdown,
+    breakdown_t* must_include_breakdown,
+    str_t space_separated_must_exclude)
 {
   anagram_context_t ctx = {0};
   ctx.initialized = true;
@@ -691,16 +696,15 @@ internal anagram_context_t begin_anagram_context(hashtable_t* hashtable, arena_t
   ctx.results.arena = new_custom_arena(1024 * 1024);
   ctx.results.not_done = true;
 
-  breakdown_t must_include_breakdown = {0};
-  breakdown_t reduced_input_breakdown = input_breakdown;
-  breakdown_word(&must_include_breakdown, must_include);
-  b32 must_include_is_valid = breakdown_subtract(&reduced_input_breakdown, &must_include_breakdown);
+  breakdown_t reduced_input_breakdown = *input_breakdown;
+  b32 must_include_is_valid = breakdown_subtract(&reduced_input_breakdown, must_include_breakdown);
 
   if(!must_include_is_valid)
   {
     // TODO: Suggest possible words to add, like in list_anagrams_for.
   }
-  else if(must_include.size > 0 && breakdown_is_empty(&reduced_input_breakdown))
+  else if(!breakdown_is_empty(must_include_breakdown)
+      && breakdown_is_empty(&reduced_input_breakdown))
   {
     begin_anagram_result(&ctx.results, 0);
   }
@@ -798,7 +802,7 @@ internal anagram_context_t begin_anagram_context(hashtable_t* hashtable, arena_t
 
     if(subkeys)
     {
-      u32 chain_max_length = max(1, breakdown_sum(&input_breakdown));
+      u32 chain_max_length = max(1, breakdown_sum(input_breakdown));
       u32 chain_length = 0;
       keylink_t** chain = alloc_array(arena, chain_max_length, keylink_t*);
 
@@ -1214,6 +1218,7 @@ internal void go_live(hashtable_t* hashtable)
   u8* input_buf   = alloc_array(&tmp_arena, MAX_USER_INPUT_SIZE, u8);
   u8* include_buf = alloc_array(&tmp_arena, MAX_USER_INPUT_SIZE, u8);
   u8* exclude_buf = alloc_array(&tmp_arena, MAX_USER_INPUT_SIZE, u8);
+  u8* previous_exclude_buf = alloc_array(&tmp_arena, MAX_USER_INPUT_SIZE, u8);
 
   ui_state_t* state = &(ui_state_t){0};
   state->ui_strs[UI_STR_INPUT].data   = input_buf;
@@ -1244,6 +1249,10 @@ internal void go_live(hashtable_t* hashtable)
     i32 anagram_start_y = frame.height - 12;
     i32 visible_anagram_count = anagram_start_y + 1;
 
+    breakdown_t previous_input_breakdown = breakdown_word(state->ui_strs[UI_STR_INPUT]);
+    breakdown_t previous_include_breakdown = breakdown_word(state->ui_strs[UI_STR_INCLUDE]);
+    str_t previous_exclude = {0, previous_exclude_buf};
+    copy_str_unsafe(state->ui_strs[UI_STR_EXCLUDE], &previous_exclude);
     i32 previous_cursor_pos = state->cursor_pos;
     i32 previous_skip_results = state->skip_results;
     undo_entry_t* previous_current_undo_entry = history->current_entry;
@@ -1365,13 +1374,13 @@ internal void go_live(hashtable_t* hashtable)
         case KEY_CTRL_K:
         {
           record_for_undo(state, history);
-          inputs_changed |= delete_substring(active_str, state->cursor_pos, active_str->size - state->cursor_pos);
+          dirty |= delete_substring(active_str, state->cursor_pos, active_str->size - state->cursor_pos);
         } break;
 
         case KEY_CTRL_U:
         {
           record_for_undo(state, history);
-          inputs_changed |= delete_substring(active_str, 0, state->cursor_pos);
+          dirty |= delete_substring(active_str, 0, state->cursor_pos);
           state->cursor_pos = 0;
         } break;
 
@@ -1382,7 +1391,7 @@ internal void go_live(hashtable_t* hashtable)
           i32 orig_cursor_pos = state->cursor_pos;
           state->cursor_pos = find_previous_word_boundary(active_str, state->cursor_pos);
           i32 offset = orig_cursor_pos - state->cursor_pos;
-          inputs_changed |= delete_substring(active_str, state->cursor_pos, offset);
+          dirty |= delete_substring(active_str, state->cursor_pos, offset);
         } break;
 
         case KEY_ALT_D:
@@ -1390,7 +1399,7 @@ internal void go_live(hashtable_t* hashtable)
         {
           record_for_undo(state, history);
           i32 offset = find_next_word_boundary(active_str, state->cursor_pos) - state->cursor_pos;
-          inputs_changed |= delete_substring(active_str, state->cursor_pos, offset);
+          dirty |= delete_substring(active_str, state->cursor_pos, offset);
         } break;
 
         case KEY_BACKSPACE:
@@ -1399,7 +1408,7 @@ internal void go_live(hashtable_t* hashtable)
           if(state->cursor_pos > 0)
           {
             --state->cursor_pos;
-            inputs_changed |= delete_substring(active_str, state->cursor_pos, 1);
+            dirty |= delete_substring(active_str, state->cursor_pos, 1);
           }
         } break;
 
@@ -1407,7 +1416,7 @@ internal void go_live(hashtable_t* hashtable)
         {
           if(state->cursor_pos < active_str->size)
           {
-            inputs_changed |= delete_substring(active_str, state->cursor_pos, 1);
+            dirty |= delete_substring(active_str, state->cursor_pos, 1);
           }
         } break;
 
@@ -1422,12 +1431,12 @@ internal void go_live(hashtable_t* hashtable)
         case KEY_CTRL_O:
         case KEY_CTRL_Z:
         {
-          inputs_changed |= undo(state, history);
+          dirty |= undo(state, history);
         } break;
 
         case KEY_CTRL_Y:
         {
-          inputs_changed |= redo(state, history);
+          dirty |= redo(state, history);
         } break;
 
         case KEY_F1:
@@ -1468,7 +1477,7 @@ internal void go_live(hashtable_t* hashtable)
               }
               ++active_str->size;
               active_str->data[state->cursor_pos++] = typed_key;
-              inputs_changed = true;
+              dirty = true;
             }
           }
         } break;
@@ -1495,6 +1504,14 @@ internal void go_live(hashtable_t* hashtable)
     if(left_clicked || mouse_left_down || right_clicked)
     {
       record_for_undo(state, history);
+    }
+
+    {
+      breakdown_t input_breakdown = breakdown_word(state->ui_strs[UI_STR_INPUT]);
+      breakdown_t include_breakdown = breakdown_word(state->ui_strs[UI_STR_INCLUDE]);
+      inputs_changed |= !breakdown_eq(&previous_input_breakdown, &input_breakdown);
+      inputs_changed |= !breakdown_eq(&previous_include_breakdown, &include_breakdown);
+      inputs_changed |= !str_eq(previous_exclude, state->ui_strs[UI_STR_EXCLUDE]);
     }
 
     dirty |= left_clicked;
@@ -1558,10 +1575,8 @@ internal void go_live(hashtable_t* hashtable)
 
       {
         i32 max_str_size = end_x - start_x;
-        breakdown_t input_remaining = {0};
-        breakdown_word(&input_remaining, state->ui_strs[UI_STR_INPUT]);
-        breakdown_t include_remaining = {0};
-        breakdown_word(&include_remaining, state->ui_strs[UI_STR_INCLUDE]);
+        breakdown_t input_remaining = breakdown_word(state->ui_strs[UI_STR_INPUT]);
+        breakdown_t include_remaining = breakdown_word(state->ui_strs[UI_STR_INCLUDE]);
         i32 prev_active_ui_str_idx = state->active_ui_str_idx;
         for(i32 pass = 0;
             pass <= 1;
@@ -1671,10 +1686,10 @@ internal void go_live(hashtable_t* hashtable)
         end_anagram_context(&anagram_context);
         dirty = true;  // update arena statistics in debug view
 
-        breakdown_t input_breakdown = {0};
-        breakdown_word(&input_breakdown, state->ui_strs[UI_STR_INPUT]);
+        breakdown_t input_breakdown = breakdown_word(state->ui_strs[UI_STR_INPUT]);
+        breakdown_t must_include_breakdown = breakdown_word(state->ui_strs[UI_STR_INCLUDE]);
         anagram_context = begin_anagram_context(hashtable, &tmp_arena,
-            input_breakdown, state->ui_strs[UI_STR_INCLUDE], state->ui_strs[UI_STR_EXCLUDE]);
+            &input_breakdown, &must_include_breakdown, state->ui_strs[UI_STR_EXCLUDE]);
 
         inputs_changed = false;
       }
@@ -1952,8 +1967,7 @@ int main(int argument_count, char** arguments)
         if(word_valid)
         {
           str_t word = {word_length, word_start};
-          breakdown_t breakdown = {0};
-          breakdown_word(&breakdown, word);
+          breakdown_t breakdown = breakdown_word(word);
           if(breakdown_sum(&breakdown) > 0)
           {
             hashtable_add_word(hashtable, &hash_arena, word, &breakdown);
@@ -2006,8 +2020,7 @@ int main(int argument_count, char** arguments)
             {
               str_t word = {word_length, input};
 
-              breakdown_t input_breakdown = {0};
-              breakdown_word(&input_breakdown, word);
+              breakdown_t input_breakdown = breakdown_word(word);
               list_anagrams_for(hashtable, &tmp_arena, input_breakdown, str(""), str(""), 20);
               clear_arena(&tmp_arena);
             }
@@ -2034,8 +2047,7 @@ int main(int argument_count, char** arguments)
           must_exclude = wrap_str(pop_arg(args));
         }
 
-        breakdown_t input_breakdown = {0};
-        breakdown_word(&input_breakdown, input);
+        breakdown_t input_breakdown = breakdown_word(input);
         arena_t tmp_arena = new_arena();
         list_anagrams_for(hashtable, &tmp_arena, input_breakdown, must_include, must_exclude, -1);
       }
